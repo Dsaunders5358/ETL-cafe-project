@@ -1,0 +1,141 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description : >
+  Template for ads resources to deploy buckets, lambda functions and triggers
+
+Resources:
+  LambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - lambda.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      Policies:
+      - PolicyName: LambdaLogsPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: '*'
+      - PolicyName: S3ObjectPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectAttributes
+              - s3:ListBucket
+              - s3:GetBucketLocation
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:DeleteObject
+            Resource:
+              - "arn:aws:s3:::ads-raw-data/*"
+              - "arn:aws:s3:::ads-processed-data/*"
+              - "arn:aws:s3:::ads-raw-data"
+              - "arn:aws:s3:::ads-processed-data"
+      - PolicyName: LambdaNetworkRolePolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+            Resource: '*'
+      - PolicyName: SSMGetPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter
+            Resource: '*' 
+
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Handler: extract_data.lambda_handler
+      Role: !GetAtt LambdaFunctionRole.Arn
+      Timeout: 850
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-01e344243c27f689c
+        SubnetIds:
+          - subnet-03a5ff2a5dd0f72e9
+          - subnet-03da0d6eeb3241cca 
+      Code:
+        S3Bucket: ads-resources
+        S3Key: deployment_package_extract.zip
+  
+  LambdaCreateDatabase:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Handler: generate_database.lambda_handler
+      Role: !GetAtt LambdaFunctionRole.Arn
+      Timeout: 10
+      VpcConfig:
+        SecurityGroupIds:
+          - sg-01e344243c27f689c
+        SubnetIds:
+          - subnet-03a5ff2a5dd0f72e9
+          - subnet-03da0d6eeb3241cca
+      Code:
+        S3Bucket: ads-resources
+        S3Key: deployment_package_tables.zip
+
+  S3BucketRawData:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: 'Retain'
+    Properties:
+      BucketName: ads-raw-data
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt LambdaFunction.Arn
+  
+  S3BucketResources:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: 'Retain'
+    Properties:
+      BucketName: ads-resources
+  
+  S3BucketProcessed:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: 'Retain'
+    Properties:
+      BucketName: ads-processed-data
+  
+  S3BucketPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref LambdaFunction
+      Principal: s3.amazonaws.com
+      SourceArn: arn:aws:s3:::ads-raw-data
+  
+  
+  
+  # GrafanaEC2Instance:
+  # LambdaDependancyLayer:
+  #   Type: AWS::Lambda::LayerVersion
+  #   Properties:
+  #     CompatibleRuntimes:
+  #       - python3.9
+  #     Content:
+  #       S3Bucket: ads-resources
+  #       S3Key: deployment_package.zip
+  #   LayerName: lambda-python-dependancies

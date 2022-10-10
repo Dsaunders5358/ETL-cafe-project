@@ -1,0 +1,98 @@
+name: CI/CD Pipeline
+
+on: # triggers on any push to main branch (including merge and pull requests) 
+  push:
+    branches:
+     - main
+
+jobs:
+  aws_credentials: # configures access to AWS using Github Secrets
+    name: Configure AWS Credentials
+    runs-on: ubuntu-latest
+    steps:
+      - name: aws-credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-region: eu-west-1
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  package-zip-files: # creates Zip files from requirements.txt and adds appropriate Python file from src folder
+    name: Package Up Zip Files
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Zip Extract Folder # packages up code to extract data from CSV files
+      run: |
+        docker run -v "$PWD":/var/task "lambci/lambda:build-python3.8" /bin/sh -c "pip install -r requirements.txt -t deployment_packages/; exit"
+        cd deployment_packages
+        zip -r ./deployment_package_extract.zip .
+        cd ..
+        cd src
+        zip -u ../deployment_packages/deployment_package_extract.zip extract_data.py
+        cd ..
+    - uses: actions/upload-artifact@v2 #uploads extract zip file into memory
+      with:
+        name: deployment-package-extract
+        path: deployment_packages/deployment_package_extract.zip
+    - name: Zip Tables Folder # packages up code to build database in AWS
+      run: |
+        docker run -v "$PWD":/var/task "lambci/lambda:build-python3.8" /bin/sh -c "pip install -r requirements.txt -t deployment_packages/; exit"
+        cd deployment_packages
+        zip -r ./deployment_package_tables.zip .
+        cd ..
+        cd src
+        zip -u ../deployment_packages/deployment_package_tables.zip generate_database.py
+        cd ..
+    - uses: actions/upload-artifact@v2 # uploads tabls zip file into memory
+      with:
+        name: deployment-package-tables
+        path: deployment_packages/deployment_package_tables.zip        
+  copy-zips-to-s3: # uploads updated zips into ADS Resources bucket at root
+    name: Upload Zip Files to ADS Resources Bucket
+    runs-on: ubuntu-18.04
+    needs: package-zip-files
+    steps:
+      - uses: actions/download-artifact@v2 # downloads zip files from memory
+        with:
+          name: deployment-package-extract
+      - uses: actions/download-artifact@v2
+        with:
+          name: deployment-package-tables
+      - name: Upload Files to Bucket # copies zips into S3 bucket
+        run: |
+          aws s3 cp deployment_package_extract.zip s3://ads-resources
+          aws s3 cp deployment_package_tables.zip s3://ads-resources
+        env: 
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: true
+  cloud_formation:
+    name: Update Cloud Formation
+    runs-on: ubuntu-18.04
+    needs: copy-zips-to-s3
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/download-artifact@v2 # downloads zip file from memory
+        with:
+          name: deployment-package-extract
+      - name: Update Lambda Code
+        run: |
+          aws lambda update-function-code --function-name ads-resources-stack-cf-LambdaFunction-69om6pvOXHhN --zip-file fileb://deployment_package_extract.zip --region eu-west-1
+        env: 
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: true
+      - name: Update Cloudformation Template
+        run: |
+          aws s3 cp ${{ github.workspace }}/templates/ads-resource-template.yaml s3://ads-resources/templates/ads-resource-template.yaml --region eu-west-1
+        env: 
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: true
+      - name: Update Cloud Formation Stack
+        run: |
+          aws cloudformation update-stack --stack-name ads-resources-stack-cf --template-url https://ads-resources.s3.eu-west-1.amazonaws.com/templates/ads-resource-template.yaml --region eu-west-1 --capabilities CAPABILITY_IAM
+        env: 
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_EC2_METADATA_DISABLED: true
